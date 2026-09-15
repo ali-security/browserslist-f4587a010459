@@ -1,15 +1,18 @@
 name: Test
 on:
-  push:
-    branches:
-      - main
-  pull_request:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'uvu file pattern to run instead of the full suite'
+        required: false
+        default: ''
 permissions:
   contents: read
 jobs:
   full:
     name: Node.js Latest Full
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout the repository
         uses: actions/checkout@v4
@@ -22,12 +25,36 @@ jobs:
         with:
           node-version: 23
           cache: pnpm
+      - name: Pin the registry to the release date
+        run: |
+          npm config set registry https://time-machines-npm.sealsecurity.io/
+          npm config set //time-machines-npm.sealsecurity.io/:_authToken=2025-05-02T15:47:09.379Z
       - name: Install dependencies
         run: pnpm install --ignore-scripts
       - name: Run tests
-        run: pnpm test
+        env:
+          BROWSERSLIST_IGNORE_OLD_DATA: '1'
+        run: |
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            NODE_ENV=test ./node_modules/.bin/uvu test "${{ inputs.test-filter }}"
+          else
+            pnpm test
+          fi
+      - name: Pack the release tarball
+        run: |
+          npx clean-publish --without-publish --temp-dir "$RUNNER_TEMP/clean-package"
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          cd "$RUNNER_TEMP/clean-package"
+          npm pack --pack-destination "$GITHUB_WORKSPACE/dist"
+      - name: Upload the release tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarball
+          path: dist/*.tgz
+          if-no-files-found: error
   short:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       matrix:
         node-version:
@@ -47,12 +74,24 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: pnpm
+      - name: Pin the registry to the release date
+        run: |
+          npm config set registry https://time-machines-npm.sealsecurity.io/
+          npm config set //time-machines-npm.sealsecurity.io/:_authToken=2025-05-02T15:47:09.379Z
       - name: Install dependencies
         run: pnpm install --ignore-scripts
       - name: Run unit tests
-        run: pnpm unit
+        env:
+          BROWSERSLIST_IGNORE_OLD_DATA: '1'
+        run: |
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            NODE_ENV=test ./node_modules/.bin/uvu test "${{ inputs.test-filter }}"
+          else
+            pnpm unit
+          fi
   old:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       matrix:
         node-version:
@@ -75,7 +114,130 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
+      - name: Pin the registry to the release date
+        run: |
+          npm config set registry https://time-machines-npm.sealsecurity.io/
+          npm config set //time-machines-npm.sealsecurity.io/:_authToken=2025-05-02T15:47:09.379Z
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile --ignore-scripts
       - name: Run unit tests
-        run: pnpm unit
+        if: matrix.node-version >= 14
+        env:
+          BROWSERSLIST_IGNORE_OLD_DATA: '1'
+        run: |
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            NODE_ENV=test ./node_modules/.bin/uvu test "${{ inputs.test-filter }}"
+          else
+            pnpm run unit
+          fi
+      - name: Run unit tests without the fs-extra 11 suites
+        if: matrix.node-version == 12
+        env:
+          BROWSERSLIST_IGNORE_OLD_DATA: '1'
+        run: NODE_ENV=test ./node_modules/.bin/uvu test '^(?!cache|custom|extends|shareable-stats).*\.test\.js$'
+      - name: Run the legacy Node.js smoke test
+        env:
+          BROWSERSLIST_IGNORE_OLD_DATA: '1'
+        # uvu 0.5.6's CLI runner cannot start on Node < 12 (uvu/run/index.js
+        # reads `globalThis` before uvu's own polyfill loads), so without this
+        # the Node 8 and 10 legs would be green no-ops running zero tests. The
+        # script is written out here instead of committed so the source tree
+        # keeps no untracked files. ES5 only - it must parse on Node 8.
+        run: |
+          cat > "$RUNNER_TEMP/old-node-smoke.js" <<'SMOKE'
+          'use strict'
+
+          var assert = require('assert')
+
+          var browserslist = require(process.cwd() + '/index.js')
+
+          var checks = 0
+
+          function ok(name, body) {
+            checks += 1
+            try {
+              body()
+            } catch (e) {
+              console.error('not ok ' + checks + ' - ' + name)
+              throw e
+            }
+            console.log('ok ' + checks + ' - ' + name)
+          }
+
+          ok('Can I Use data is loaded', function () {
+            assert.ok(Object.keys(browserslist.data).length > 0, 'browserslist.data')
+            assert.ok(
+              Object.keys(browserslist.usage.global).length > 0,
+              'browserslist.usage.global'
+            )
+            assert.ok(Array.isArray(browserslist.defaults), 'browserslist.defaults')
+            assert.ok(Array.isArray(browserslist.nodeVersions), 'nodeVersions')
+            assert.ok(browserslist.nodeVersions.length > 0, 'nodeVersions is not empty')
+          })
+
+          ok('browserslist() resolves a version query', function () {
+            var result = browserslist('last 2 versions')
+            assert.ok(Array.isArray(result), 'result is an array')
+            assert.ok(result.length > 0, 'result is not empty')
+            assert.strictEqual(typeof result[0], 'string', 'result holds strings')
+          })
+
+          ok('browserslist() resolves a usage query', function () {
+            var result = browserslist('> 0.5%')
+            assert.ok(Array.isArray(result), 'result is an array')
+            assert.ok(result.length > 0, 'result is not empty')
+          })
+
+          ok('browserslist() resolves the default query', function () {
+            var result = browserslist()
+            assert.ok(result.length > 0, 'defaults are not empty')
+          })
+
+          ok('browserslist() resolves a Node.js query', function () {
+            var result = browserslist('node 10')
+            assert.ok(result.length > 0, 'node 10 is not empty')
+            assert.strictEqual(result[0].indexOf('node '), 0, 'node prefix')
+          })
+
+          ok('browserslist.parse() returns the query AST', function () {
+            var parsed = browserslist.parse('last 2 versions')
+            assert.ok(Array.isArray(parsed), 'parsed is an array')
+            assert.ok(parsed.length > 0, 'parsed is not empty')
+          })
+
+          ok('browserslist.coverage() returns a share of the market', function () {
+            var coverage = browserslist.coverage(browserslist('> 0.5%'))
+            assert.strictEqual(typeof coverage, 'number', 'coverage is a number')
+            assert.ok(coverage > 0, 'coverage is positive')
+          })
+
+          ok('browserslist.parseConfig() splits sections', function () {
+            var config = browserslist.parseConfig(
+              '# a comment\n> 1%\nlast 2 versions\n[production]\nie 11'
+            )
+            assert.deepEqual(config.defaults, ['> 1%', 'last 2 versions'], 'defaults')
+            assert.deepEqual(config.production, ['ie 11'], 'production')
+          })
+
+          ok('browserslist.loadConfig() is undefined without a config', function () {
+            assert.strictEqual(browserslist.loadConfig({}), undefined)
+          })
+
+          ok('browserslist() throws on an unknown query', function () {
+            assert.throws(function () {
+              browserslist('invalid query')
+            })
+          })
+
+          ok('repeated queries are stable across clearCaches()', function () {
+            var first = browserslist('last 2 versions')
+            var cached = browserslist('last 2 versions')
+            assert.deepEqual(first, cached, 'cached result matches')
+            browserslist.clearCaches()
+            var recomputed = browserslist('last 2 versions')
+            assert.deepEqual(first, recomputed, 'recomputed result matches')
+          })
+
+          console.log('# ' + checks + ' smoke checks passed on Node ' + process.version)
+          SMOKE
+          node "$RUNNER_TEMP/old-node-smoke.js"
