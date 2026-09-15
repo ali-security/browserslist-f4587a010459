@@ -2,7 +2,7 @@ let { writeFile, remove, mkdir } = require('fs-extra')
 let { tmpdir } = require('os')
 let { join } = require('path')
 let { test } = require('uvu')
-let { equal, not } = require('uvu/assert')
+let { equal, not, ok } = require('uvu/assert')
 
 delete require.cache[require.resolve('..')]
 let browserslist = require('..')
@@ -35,6 +35,44 @@ test('caches configuration but the cache is clearable', async () => {
   browserslist.clearCaches()
   let result3 = browserslist.findConfig(DIR)
   not.equal(result1, result3)
+})
+
+test('evicts oldest entries once the in-memory cache is full', () => {
+  let first = browserslist('since 1990-01-01')
+  equal(browserslist('since 1990-01-01'), first)
+
+  // Fill the cache past its maximum so the first query is evicted
+  for (let day = 2; day <= 600; day++) {
+    browserslist('since 1990-01-' + day)
+  }
+
+  // Evicted query is recomputed (new reference), same value
+  let recomputed = browserslist('since 1990-01-01')
+  not.ok(recomputed === first)
+  equal(recomputed, first)
+
+  // Recently cached query still returns the cached reference
+  let recent = browserslist('since 1990-01-600')
+  ok(browserslist('since 1990-01-600') === recent)
+})
+
+test('evicts oldest entries once the query parsing cache is full', () => {
+  let first = browserslist.parse('since 1991-01-01')
+  ok(browserslist.parse('since 1991-01-01') === first)
+
+  // Fill the cache past its maximum so the first query is evicted
+  for (let day = 2; day <= 600; day++) {
+    browserslist.parse('since 1991-01-' + day)
+  }
+
+  // Evicted query is parsed again (new reference), same value
+  let recomputed = browserslist.parse('since 1991-01-01')
+  not.ok(recomputed === first)
+  equal(recomputed, first)
+
+  // Recently cached query still returns the cached reference
+  let recent = browserslist.parse('since 1991-01-600')
+  ok(browserslist.parse('since 1991-01-600') === recent)
 })
 
 test('does not use cache when ENV variable set', async () => {
